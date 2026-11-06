@@ -32,6 +32,24 @@ jobs:
           wsl.exe --status
           exit 0
 
+      - name: Install WSL runtime on ARM64 if missing
+        if: runner.arch == 'ARM64'
+        run: |
+          wsl.exe --version
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          $msi = Join-Path $env:RUNNER_TEMP 'wsl.3.0.3.0.arm64.msi'
+          $url = 'https://github.com/microsoft/WSL/releases/download/3.0.3/wsl.3.0.3.0.arm64.msi'
+          curl.exe --fail --location --silent --show-error --retry 2 --output $msi $url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash -LiteralPath $msi).Hash -ne '2937c7ce840bb35ec6e97f052189bdfff27f8c3463bfdd231df9a958212787a3') {
+            throw 'WSL MSI SHA-256 does not match the Microsoft release.'
+          }
+          $installer = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
+          Write-Host "WSL MSI exit code: $($installer.ExitCode)"
+          if ($installer.ExitCode -notin @(0, 3010)) { exit $installer.ExitCode }
+          wsl.exe --version
+          exit $LASTEXITCODE
+
       - name: Install Debian
         run: |
           wsl.exe --set-default-version 2
@@ -62,7 +80,17 @@ jobs:
       - name: Run cmd.exe from Debian
         if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
         run: |
-          wsl.exe --distribution Debian --user root --cd / --exec cmd.exe /d /c echo WSL_WINDOWS_INTEROP_OK
+          $probe = @'
+          printf 'Linux PATH: %s\n' "$PATH"
+          if [ -f /etc/wsl.conf ]; then cat /etc/wsl.conf; fi
+          if command -v cmd.exe && cmd.exe /d /c echo WSL_WINDOWS_INTEROP_OK; then
+            exit 0
+          fi
+          echo 'Trying cmd.exe by absolute path on the mounted Windows drive'
+          ls -ld /mnt/c /mnt/c/Windows/System32/cmd.exe
+          /mnt/c/Windows/System32/cmd.exe /d /c echo WSL_WINDOWS_INTEROP_OK
+          '@
+          wsl.exe --distribution Debian --user root --cd / --exec sh -c ($probe -replace '\r', '')
           exit $LASTEXITCODE
 
       - name: Update apt and install a small Debian package
