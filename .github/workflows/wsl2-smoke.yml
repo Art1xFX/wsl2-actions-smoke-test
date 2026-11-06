@@ -1,0 +1,72 @@
+name: WSL2 Debian smoke test
+'on':
+  push:
+    branches: [main]
+    paths: ['.github/workflows/wsl2-smoke.yml']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  smoke:
+    name: Debian WSL2 on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      WSL_UTF8: '1'
+    steps:
+      - name: Record runner and WSL state
+        run: |
+          Write-Host "Runner architecture: $env:RUNNER_ARCH"
+          Get-CimInstance Win32_OperatingSystem | Format-List Caption, Version, BuildNumber
+          Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction Continue |
+            Format-List FeatureName, State
+          wsl.exe --version
+          wsl.exe --status
+          exit 0
+
+      - name: Install Debian
+        run: |
+          wsl.exe --set-default-version 2
+          Write-Host "wsl --set-default-version 2 exit code: $LASTEXITCODE"
+          wsl.exe --install --distribution Debian --web-download --no-launch
+          $installExit = $LASTEXITCODE
+          Write-Host "wsl --install exit code: $installExit"
+          exit $installExit
+
+      - name: Verify Debian is registered as WSL2
+        id: verify
+        if: ${{ always() && !cancelled() }}
+        run: |
+          $distros = (wsl.exe --list --verbose | Out-String) -replace '\x00', ''
+          $listExit = $LASTEXITCODE
+          Write-Host $distros
+          if ($listExit -ne 0 -or $distros -notmatch '(?m)^\s*\*?\s*Debian\s+\S+\s+2\s*$') {
+            throw "Expected Debian with VERSION 2 in wsl --list --verbose."
+          }
+
+      - name: Boot Debian and run Linux commands
+        id: boot
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
+        run: |
+          wsl.exe --distribution Debian --user root --cd / --exec sh -ec 'uname -a; cat /etc/os-release'
+          exit $LASTEXITCODE
+
+      - name: Run cmd.exe from Debian
+        if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
+        run: |
+          wsl.exe --distribution Debian --user root --cd / --exec cmd.exe /d /c echo WSL_WINDOWS_INTEROP_OK
+          exit $LASTEXITCODE
+
+      - name: Update apt and install a small Debian package
+        if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
+        run: |
+          wsl.exe --distribution Debian --user root --cd / --exec sh -ec 'dpkg --print-architecture; apt-get -o Acquire::Retries=1 update; DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 install -y --no-install-recommends hello; dpkg-query -s hello; hello'
+          exit $LASTEXITCODE
